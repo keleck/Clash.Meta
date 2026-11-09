@@ -15,6 +15,7 @@ import (
 	N "github.com/metacubex/mihomo/common/net"
 
 	"github.com/metacubex/http"
+	"github.com/metacubex/http/h2c"
 )
 
 type ServerOption struct {
@@ -126,7 +127,9 @@ func NewServerHandler(opt ServerOption) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &requestHandler{
+	// using h2c.NewHandler to ensure we can work in plain http2
+	// and some tls conn is not *tls.Conn (like *reality.Conn)
+	return h2c.NewHandler(&requestHandler{
 		config:               opt.Config,
 		connHandler:          opt.ConnHandler,
 		httpHandler:          opt.HttpHandler,
@@ -135,7 +138,9 @@ func NewServerHandler(opt ServerOption) (http.Handler, error) {
 		scStreamUpServerSecs: scStreamUpServerSecs,
 		scMaxBufferedPosts:   scMaxBufferedPosts,
 		sessions:             map[string]*httpSession{},
-	}, nil
+	}, &http.Http2Server{
+		IdleTimeout: 30 * time.Second,
+	}), nil
 }
 
 func (h *requestHandler) upsertSession(sessionID string) *httpSession {
@@ -271,7 +276,6 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid xpadding", http.StatusBadRequest)
 		return
 	}
-	obfsPaddingAccepted := h.config.XPaddingObfsMode && paddingValue != ""
 	sessionId, seqStr := h.config.ExtractMetaFromRequest(r, path)
 
 	var currentSession *httpSession
@@ -306,8 +310,8 @@ func (h *requestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = rc.EnableFullDuplex() // http1 need to enable full duplex manually
 		_ = rc.Flush()            // force flush the response header
 
-		hasLegacyRefererCompatMarker := r.Header.Get("Referer") != ""
-		if (hasLegacyRefererCompatMarker || obfsPaddingAccepted) && h.scStreamUpServerSecs.Max > 0 {
+		referrer := r.Header.Get("Referer")
+		if referrer != "" && h.scStreamUpServerSecs.Max > 0 {
 			go func() {
 				for {
 					_, err := httpSC.Write(bytes.Repeat([]byte{'X'}, int(h.xPaddingBytes.Rand())))

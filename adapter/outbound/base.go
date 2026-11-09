@@ -69,7 +69,7 @@ func NewBase(opt BaseOption) *Base {
 		iface:  opt.Interface,
 		rmark:  opt.RoutingMark,
 		prefer: opt.Prefer,
-		id:     utils.NewUUIDV4(),
+		id:     utils.NewUUIDV6(),
 	}
 }
 
@@ -177,7 +177,7 @@ func (b *Base) DialOptions() (opts []dialer.Option) {
 
 func (b *Base) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
 	if !metadata.Resolved() {
-		ip, err := resolveIPWithResolver(ctx, metadata.Host, b.prefer, resolver.DefaultResolver)
+		ip, err := resolver.ResolveIP(ctx, metadata.Host)
 		if err != nil {
 			return fmt.Errorf("can't resolve ip: %w", err)
 		}
@@ -202,7 +202,6 @@ type BasicOption struct {
 	// The following parameters are used internally, assign value by the structure decoder are disallowed
 	//
 	DialerForAPI C.Dialer `proxy:"-"` // the dialer used for API usage has higher priority than all the above configurations.
-	TunnelForAPI C.Tunnel `proxy:"-"`
 	ProviderName string   `proxy:"-"`
 }
 
@@ -210,16 +209,12 @@ func (b *BasicOption) NewDialer(opts []dialer.Option) C.Dialer {
 	cDialer := b.DialerForAPI
 	if cDialer == nil {
 		if b.DialerProxy != "" {
-			cDialer = proxydialer.NewByName(b.DialerProxy, b.NewTunnel())
+			cDialer = proxydialer.NewByName(b.DialerProxy)
 		} else {
 			cDialer = dialer.NewDialer(opts...)
 		}
 	}
 	return cDialer
-}
-
-func (b *BasicOption) NewTunnel() C.Tunnel {
-	return b.TunnelForAPI
 }
 
 type conn struct {
@@ -274,20 +269,8 @@ func (c *conn) AddRef(ref any) {
 	c.ExtendedConn = N.NewRefConn(c.ExtendedConn, ref) // add ref for autoCloseProxyAdapter
 }
 
-// ipstackConn is a common experimental API interface implemented by:
-// *mipstack.TCPConn, *mipstack.UDPConn, *mipstack.IPConn
-// it's also implemented by our gVisor fork
-type ipstackConn interface {
-	ReadWithBuffer(getBuffer func(sizeHint int) []byte) (int, error)
-}
-
 func NewConn(c net.Conn, a C.ProxyAdapter) C.Conn {
-	switch c.(type) {
-	case syscall.Conn: // exclusion system conn like *net.TCPConn
-		break
-	case ipstackConn: // exclusion *mipstack.TCPConn
-		break
-	default:
+	if _, ok := c.(syscall.Conn); !ok { // exclusion system conn like *net.TCPConn
 		c = N.NewDeadlineConn(c) // most conn from outbound can't handle readDeadline correctly
 	}
 	cc := &conn{N.NewExtendedConn(c), nil, nil, a.Addr()}
@@ -351,14 +334,9 @@ func (c *packetConn) AddRef(ref any) {
 	c.EnhancePacketConn = N.NewRefPacketConn(c.EnhancePacketConn, ref) // add ref for autoCloseProxyAdapter
 }
 
-func NewPacketConn(pc net.PacketConn, a ProxyAdapter) C.PacketConn {
+func newPacketConn(pc net.PacketConn, a ProxyAdapter) C.PacketConn {
 	epc := N.NewEnhancePacketConn(pc)
-	switch pc.(type) {
-	case syscall.Conn: // exclusion system conn like *net.UDPConn
-		break
-	case ipstackConn: // exclusion *mipstack.UDPConn
-		break
-	default:
+	if _, ok := pc.(syscall.Conn); !ok { // exclusion system conn like *net.UDPConn
 		epc = N.NewDeadlineEnhancePacketConn(epc) // most conn from outbound can't handle readDeadline correctly
 	}
 	cpc := &packetConn{epc, nil, nil, a.Name(), utils.NewUUIDV4().String(), a.Addr(), a.ResolveUDP}

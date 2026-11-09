@@ -15,10 +15,9 @@ import (
 const Name = "mihomo"
 
 var (
-	GeositeName   = "GeoSite.dat"
-	GeoipName     = "GeoIP.dat"
-	ASNName       = "ASN.mmdb"
-	BundleMRSName = "BundleMRS.7z"
+	GeositeName = "GeoSite.dat"
+	GeoipName   = "GeoIP.dat"
+	ASNName     = "ASN.mmdb"
 )
 
 // Path is used to get the configuration path
@@ -162,25 +161,6 @@ func (p *path) ASN() string {
 		}
 	}
 	return P.Join(p.homeDir, ASNName)
-}
-
-func (p *path) BundleMRS() string {
-	files, err := os.ReadDir(p.homeDir)
-	if err != nil {
-		return ""
-	}
-	for _, fi := range files {
-		if fi.IsDir() {
-			// 目录则直接跳过
-			continue
-		} else {
-			if strings.EqualFold(fi.Name(), "BundleMRS.7z") {
-				BundleMRSName = fi.Name()
-				return P.Join(p.homeDir, fi.Name())
-			}
-		}
-	}
-	return P.Join(p.homeDir, BundleMRSName)
 }
 
 func (p *path) OldCache() string {

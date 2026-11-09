@@ -13,7 +13,6 @@ import (
 	"github.com/metacubex/mihomo/common/convert"
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/common/yaml"
-	"github.com/metacubex/mihomo/component/age"
 	"github.com/metacubex/mihomo/component/profile/cachefile"
 	"github.com/metacubex/mihomo/component/resource"
 	C "github.com/metacubex/mihomo/constant"
@@ -205,7 +204,7 @@ func NewProxySetProvider(name string, interval time.Duration, payload []map[stri
 		hc.setProxies(proxies)
 	}
 
-	fetcher := resource.NewFetcher[[]C.Proxy](name, interval, vehicle, nil, parser, pd.setProxies)
+	fetcher := resource.NewFetcher[[]C.Proxy](name, interval, vehicle, parser, pd.setProxies)
 	pd.Fetcher = fetcher
 	if httpVehicle, ok := vehicle.(*resource.HTTPVehicle); ok {
 		httpVehicle.SetInRead(func(resp *http.Response) {
@@ -340,7 +339,7 @@ func (cp *CompatibleProvider) Close() error {
 	return cp.compatibleProvider.Close()
 }
 
-func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilter string, excludeType string, dialerProxy string, override overrideSchema, ageSecretKey string) (resource.Parser[[]C.Proxy], error) {
+func NewProxiesParser(pdName string, filter string, excludeFilter string, excludeType string, dialerProxy string, override overrideSchema) (resource.Parser[[]C.Proxy], error) {
 	var excludeTypeArray []string
 	if excludeType != "" {
 		excludeTypeArray = strings.Split(excludeType, "|")
@@ -366,20 +365,8 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 		filterRegs = append(filterRegs, filterReg)
 	}
 
-	if ageSecretKey != "" {
-		if err := age.VeritySecretKeys(ageSecretKey); err != nil {
-			return nil, fmt.Errorf("invalid age-secret-key: %w", err)
-		}
-	}
-
 	return func(buf []byte) ([]C.Proxy, error) {
 		schema := &ProxySchema{}
-
-		// decrypt config
-		buf, err := age.DecryptBytes(buf, ageSecretKey)
-		if err != nil {
-			return nil, fmt.Errorf("decrypt config error: %w", err)
-		}
 
 		if err := yaml.Unmarshal(buf, schema); err != nil {
 			proxies, err1 := convert.ConvertsV2Ray(buf)
@@ -446,7 +433,7 @@ func NewProxiesParser(pdName string, tunnel C.Tunnel, filter string, excludeFilt
 					return nil, fmt.Errorf("proxy %d override error: %w", idx, err)
 				}
 
-				proxy, err := adapter.ParseProxy(mapping, adapter.WithTunnelForAPI(tunnel), adapter.WithProviderName(pdName))
+				proxy, err := adapter.ParseProxy(mapping, adapter.WithProviderName(pdName))
 				if err != nil {
 					return nil, fmt.Errorf("proxy %d error: %w", idx, err)
 				}

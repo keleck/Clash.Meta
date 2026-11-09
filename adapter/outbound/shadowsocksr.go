@@ -96,7 +96,7 @@ func (ssr *ShadowSocksR) ListenPacketContext(ctx context.Context, metadata *C.Me
 
 	epc := ssr.cipher.PacketConn(N.NewEnhancePacketConn(pc))
 	epc = ssr.protocol.PacketConn(epc)
-	return NewPacketConn(&ssrPacketConn{EnhancePacketConn: epc, rAddr: addr}, ssr), nil
+	return newPacketConn(&ssrPacketConn{EnhancePacketConn: epc, rAddr: addr}, ssr), nil
 }
 
 // ProxyInfo implements C.ProxyAdapter
@@ -189,12 +189,7 @@ func (spc *ssrPacketConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
 	if err != nil {
 		return
 	}
-	packet = packet[3:]
-	_, err = spc.EnhancePacketConn.WriteTo(packet, spc.rAddr)
-	if err != nil {
-		return 0, err
-	}
-	return len(b), nil
+	return spc.EnhancePacketConn.WriteTo(packet[3:], spc.rAddr)
 }
 
 func (spc *ssrPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {

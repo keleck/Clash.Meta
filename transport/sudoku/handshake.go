@@ -212,54 +212,18 @@ func (c *directionalConn) CloseWrite() error {
 	if c == nil {
 		return nil
 	}
-
-	firstErr := c.runClosers()
-	if err := closeWrite(c.writer); err != nil && firstErr == nil {
-		firstErr = err
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
 	}
-	if err := closeWrite(c.Conn); err != nil && firstErr == nil {
-		firstErr = err
-	}
-	return firstErr
+	return nil
 }
 
 func (c *directionalConn) CloseRead() error {
 	if c == nil {
 		return nil
 	}
-
-	if err := closeRead(c.reader); err != nil {
-		return err
-	}
-	return closeRead(c.Conn)
-}
-
-func (c *directionalConn) runClosers() error {
-	var firstErr error
-	for _, fn := range c.closers {
-		if fn == nil {
-			continue
-		}
-		if err := fn(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
-}
-
-func closeRead(target any) error {
-	if closer, ok := target.(interface{ CloseRead() error }); ok {
-		return closer.CloseRead()
-	}
-	return nil
-}
-
-func closeWrite(target any) error {
-	if closer, ok := target.(interface{ CloseWrite() error }); ok {
-		return closer.CloseWrite()
-	}
-	if closer, ok := target.(io.Closer); ok {
-		return closer.Close()
+	if cr, ok := c.Conn.(interface{ CloseRead() error }); ok {
+		return cr.CloseRead()
 	}
 	return nil
 }
@@ -294,7 +258,14 @@ func newClientDownlinkReader(raw net.Conn, table *sudoku.Table, paddingMin, padd
 
 func newServerDownlinkWriter(raw net.Conn, table *sudoku.Table, paddingMin, paddingMax int, pureDownlink bool) (io.Writer, []func() error) {
 	downlinkTable := oppositeDirectionTable(table)
-	return sudoku.NewServerDownlinkWriter(raw, downlinkTable, paddingMin, paddingMax, pureDownlink)
+	if pureDownlink {
+		if downlinkTable == table {
+			return nil, nil
+		}
+		return sudoku.NewConn(raw, downlinkTable, paddingMin, paddingMax, false), nil
+	}
+	packed := sudoku.NewPackedConn(raw, downlinkTable, paddingMin, paddingMax)
+	return packed, []func() error{packed.Flush}
 }
 
 func buildClientObfsConn(raw net.Conn, cfg *ProtocolConfig, table *sudoku.Table) net.Conn {
@@ -309,6 +280,9 @@ func buildClientObfsConn(raw net.Conn, cfg *ProtocolConfig, table *sudoku.Table)
 func buildServerObfsConn(raw net.Conn, cfg *ProtocolConfig, table *sudoku.Table, record bool) (*sudoku.Conn, net.Conn) {
 	uplinkSudoku := sudoku.NewConn(raw, table, cfg.PaddingMin, cfg.PaddingMax, record)
 	downlinkWriter, closers := newServerDownlinkWriter(raw, table, cfg.PaddingMin, cfg.PaddingMax, cfg.EnablePureDownlink)
+	if downlinkWriter == nil {
+		return uplinkSudoku, uplinkSudoku
+	}
 	return uplinkSudoku, newDirectionalConn(raw, uplinkSudoku, downlinkWriter, closers...)
 }
 
@@ -465,7 +439,7 @@ func ServerHandshake(rawConn net.Conn, cfg *ProtocolConfig) (net.Conn, *Handshak
 		return nil, nil, &SuspiciousError{Err: fmt.Errorf("resolve table hint failed: %w", err), Conn: &prefixedRecorderConn{Conn: sConn, prefix: httpHeaderData}}
 	}
 	if resolvedTable != selectedTable {
-		downlinkWriter, closers := sudoku.NewServerDownlinkWriter(baseConn, resolvedTable.OppositeDirection(), cfg.PaddingMin, cfg.PaddingMax, cfg.EnablePureDownlink)
+		downlinkWriter, closers := newServerDownlinkWriter(baseConn, resolvedTable, cfg.PaddingMin, cfg.PaddingMax, cfg.EnablePureDownlink)
 		switchable, ok := obfsConn.(*directionalConn)
 		if !ok {
 			return nil, nil, &SuspiciousError{Err: fmt.Errorf("switch downlink writer failed"), Conn: &prefixedRecorderConn{Conn: sConn, prefix: httpHeaderData}}
@@ -526,7 +500,7 @@ func ReadServerSession(conn net.Conn, meta *HandshakeMeta) (*ServerSession, erro
 	case KIPTypeStartMux:
 		return &ServerSession{Conn: conn, Type: SessionTypeMultiplex, UserHash: userHash}, nil
 	case KIPTypeOpenTCP:
-		target, err := DecodeAddress(first.Payload)
+		target, err := DecodeAddress(bytes.NewReader(first.Payload))
 		if err != nil {
 			return nil, fmt.Errorf("decode target address failed: %w", err)
 		}

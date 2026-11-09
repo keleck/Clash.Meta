@@ -60,10 +60,7 @@ func writePacket(w io.Writer, socks5Addr, payload []byte) (int, error) {
 	buf.Write(crlf)
 	buf.Write(payload)
 
-	if _, err := w.Write(buf.Bytes()); err != nil {
-		return 0, err
-	}
-	return len(payload), nil
+	return w.Write(buf.Bytes())
 }
 
 func WritePacket(w io.Writer, socks5Addr, payload []byte) (int, error) {
@@ -205,12 +202,6 @@ func (pc *PacketConn) WaitReadFrom() (data []byte, put func(), addr net.Addr, er
 		return nil, nil, nil, err
 	}
 	length := binary.BigEndian.Uint16(data)
-	if length > maxLength {
-		if put != nil {
-			put()
-		}
-		return nil, nil, nil, errors.New("packet invalid")
-	}
 
 	if length > 0 {
 		data = data[:length]

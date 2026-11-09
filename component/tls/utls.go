@@ -40,6 +40,9 @@ func NewListener(inner net.Listener, config *Config) net.Listener {
 }
 
 func GetFingerprint(clientFingerprint string) (UClientHelloID, bool) {
+	if len(clientFingerprint) == 0 {
+		clientFingerprint = globalFingerprint
+	}
 	if len(clientFingerprint) == 0 || clientFingerprint == "none" {
 		return UClientHelloID{}, false
 	}
@@ -315,4 +318,14 @@ func GetTLSConnectionState(conn net.Conn) (tlsState tls.ConnectionState) {
 		return tlsConnectionState(state)
 	}
 	return
+}
+
+var globalFingerprint string
+
+func SetGlobalFingerprint(fingerprint string) {
+	globalFingerprint = fingerprint
+}
+
+func GetGlobalFingerprint() string {
+	return globalFingerprint
 }

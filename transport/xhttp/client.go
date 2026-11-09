@@ -3,6 +3,8 @@ package xhttp
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -12,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/metacubex/mihomo/common/contextutils"
 	"github.com/metacubex/mihomo/common/httputils"
 
 	"github.com/metacubex/http"
@@ -200,15 +201,8 @@ func NewTransport(dialRaw DialRawFunc, wrapTLS WrapTLSFunc, dialQUIC DialQUICFun
 	if keepAlivePeriod < 0 {
 		keepAlivePeriod = 0
 	}
-	// use h2c mode to disallow the net/http fallback to http1.1
-	//
-	// Note that this usage is only applicable to our own net/http fork.
-	// The standard library also needs to mask the tls.Conn type for the conn returned by DialTLSContext,
-	// see: https://github.com/golang/go/issues/79293#issuecomment-4426393534
-	protocols := new(http.Protocols)
-	protocols.SetUnencryptedHTTP2(true)
-	return &http.Transport{
-		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return &http.Http2Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
 			raw, err := dialRaw(ctx)
 			if err != nil {
 				return nil, err
@@ -221,10 +215,7 @@ func NewTransport(dialRaw DialRawFunc, wrapTLS WrapTLSFunc, dialQUIC DialQUICFun
 			return wrapped, nil
 		},
 		IdleConnTimeout: ConnIdleTimeout,
-		Protocols:       protocols,
-		HTTP2: &http.HTTP2Config{
-			SendPingTimeout: keepAlivePeriod,
-		},
+		ReadIdleTimeout: keepAlivePeriod,
 	}
 }
 
@@ -235,7 +226,6 @@ type Client struct {
 	cfg                   *Config
 	scMaxEachPostBytes    Range
 	scMinPostsIntervalMs  Range
-	generateSessionID     func() string
 	makeTransport         TransportMaker
 	makeDownloadTransport TransportMaker
 	uploadManager         *ReuseManager
@@ -257,10 +247,6 @@ func NewClient(cfg *Config, makeTransport TransportMaker, makeDownloadTransport 
 	if err != nil {
 		return nil, err
 	}
-	generateSessionID, err := cfg.GetGenerateSessionID()
-	if err != nil {
-		return nil, err
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 
 	client := &Client{
@@ -268,7 +254,6 @@ func NewClient(cfg *Config, makeTransport TransportMaker, makeDownloadTransport 
 		cfg:                   cfg,
 		scMaxEachPostBytes:    scMaxEachPostBytes,
 		scMinPostsIntervalMs:  scMinPostsIntervalMs,
-		generateSessionID:     generateSessionID,
 		makeTransport:         makeTransport,
 		makeDownloadTransport: makeDownloadTransport,
 		ctx:                   ctx,
@@ -312,14 +297,14 @@ func (c *Client) Close() error {
 	return errors.Join(errs...)
 }
 
-func (c *Client) Dial(ctx context.Context) (net.Conn, error) {
+func (c *Client) Dial() (net.Conn, error) {
 	switch c.mode {
 	case "stream-one":
-		return c.DialStreamOne(ctx)
+		return c.DialStreamOne()
 	case "stream-up":
-		return c.DialStreamUp(ctx)
+		return c.DialStreamUp()
 	case "packet-up":
-		return c.DialPacketUp(ctx)
+		return c.DialPacketUp()
 	default:
 		return nil, fmt.Errorf("xhttp mode %s is not implemented yet", c.mode)
 	}
@@ -339,7 +324,7 @@ func (c *Client) getTransport() (uploadTransport http.RoundTripper, downloadTran
 	return
 }
 
-func (c *Client) DialStreamOne(ctx context.Context) (net.Conn, error) {
+func (c *Client) DialStreamOne() (net.Conn, error) {
 	transport, _, err := c.getTransport()
 	if err != nil {
 		return nil, err
@@ -361,26 +346,18 @@ func (c *Client) DialStreamOne(ctx context.Context) (net.Conn, error) {
 	// which can't be sent because we haven't returned the conn yet.
 	gotConn := make(chan bool, 1)
 
-	reqCtx, reqCancel := context.WithCancel(c.ctx) // reqCtx must alive during conn not closed
-	stop := contextutils.AfterFunc(ctx, reqCancel) // temporarily connect ctx with reqCtx when dialing
-	defer stop()                                   // disconnect ctx with reqCtx after dialing
-
-	addrCtx := httputils.NewAddrContext(&conn.NetAddr, reqCtx)
-	streamCtx := httptrace.WithClientTrace(addrCtx, &httptrace.ClientTrace{
+	addrCtx := httputils.NewAddrContext(&conn.NetAddr, c.ctx)
+	ctx := httptrace.WithClientTrace(addrCtx, &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
-			select {
-			case gotConn <- true:
-			default: // GotConn maybe called multiple times, ignore the second and later calls
-			}
+			gotConn <- true
 		},
 	})
 
-	req, err := http.NewRequestWithContext(streamCtx, c.cfg.GetNormalizedUplinkHTTPMethod(), requestURL.String(), pr)
+	req, err := http.NewRequestWithContext(ctx, c.cfg.GetNormalizedUplinkHTTPMethod(), requestURL.String(), pr)
 	if err != nil {
 		_ = pr.Close()
 		_ = pw.Close()
 		httputils.CloseTransport(transport)
-		reqCancel()
 		return nil, err
 	}
 	req.Host = c.cfg.Host
@@ -389,7 +366,6 @@ func (c *Client) DialStreamOne(ctx context.Context) (net.Conn, error) {
 		_ = pr.Close()
 		_ = pw.Close()
 		httputils.CloseTransport(transport)
-		reqCancel()
 		return nil, err
 	}
 
@@ -415,7 +391,6 @@ func (c *Client) DialStreamOne(ctx context.Context) (net.Conn, error) {
 		_ = pr.Close()
 		_ = pw.Close()
 		httputils.CloseTransport(transport)
-		reqCancel()
 		var buf [0]byte
 		_, err = wrc.Read(buf[:])
 		return nil, err
@@ -425,13 +400,12 @@ func (c *Client) DialStreamOne(ctx context.Context) (net.Conn, error) {
 	conn.onClose = func() {
 		_ = pr.Close()
 		httputils.CloseTransport(transport)
-		reqCancel()
 	}
 
 	return conn, nil
 }
 
-func (c *Client) DialStreamUp(ctx context.Context) (net.Conn, error) {
+func (c *Client) DialStreamUp() (net.Conn, error) {
 	uploadTransport, downloadTransport, err := c.getTransport()
 	if err != nil {
 		return nil, err
@@ -457,22 +431,15 @@ func (c *Client) DialStreamUp(ctx context.Context) (net.Conn, error) {
 
 	conn := &Conn{writer: pw}
 
-	sessionID := c.generateSessionID()
+	sessionID := newSessionID()
 
 	// Async download: avoid blocking on CDN response header buffering
 	gotConn := make(chan bool, 1)
 
-	reqCtx, reqCancel := context.WithCancel(c.ctx) // reqCtx must alive during conn not closed
-	stop := contextutils.AfterFunc(ctx, reqCancel) // temporarily connect ctx with reqCtx when dialing
-	defer stop()                                   // disconnect ctx with reqCtx after dialing
-
-	addrCtx := httputils.NewAddrContext(&conn.NetAddr, reqCtx)
+	addrCtx := httputils.NewAddrContext(&conn.NetAddr, c.ctx)
 	downloadCtx := httptrace.WithClientTrace(addrCtx, &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
-			select {
-			case gotConn <- true:
-			default: // GotConn maybe called multiple times, ignore the second and later calls
-			}
+			gotConn <- true
 		},
 	})
 
@@ -485,20 +452,18 @@ func (c *Client) DialStreamUp(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		httputils.CloseTransport(uploadTransport)
 		httputils.CloseTransport(downloadTransport)
-		reqCancel()
 		return nil, err
 	}
 
 	if err := downloadCfg.FillDownloadRequest(downloadReq, sessionID); err != nil {
 		httputils.CloseTransport(uploadTransport)
 		httputils.CloseTransport(downloadTransport)
-		reqCancel()
 		return nil, err
 	}
 	downloadReq.Host = downloadCfg.Host
 
 	uploadReq, err := http.NewRequestWithContext(
-		reqCtx,
+		c.ctx,
 		c.cfg.GetNormalizedUplinkHTTPMethod(),
 		streamURL.String(),
 		pr,
@@ -506,14 +471,12 @@ func (c *Client) DialStreamUp(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		httputils.CloseTransport(uploadTransport)
 		httputils.CloseTransport(downloadTransport)
-		reqCancel()
 		return nil, err
 	}
 
 	if err = c.cfg.FillStreamRequest(uploadReq, sessionID); err != nil {
 		httputils.CloseTransport(uploadTransport)
 		httputils.CloseTransport(downloadTransport)
-		reqCancel()
 		return nil, err
 	}
 	uploadReq.Host = c.cfg.Host
@@ -540,7 +503,6 @@ func (c *Client) DialStreamUp(ctx context.Context) (net.Conn, error) {
 		_ = pw.Close()
 		httputils.CloseTransport(uploadTransport)
 		httputils.CloseTransport(downloadTransport)
-		reqCancel()
 		var buf [0]byte
 		_, err = wrc.Read(buf[:])
 		return nil, err
@@ -568,13 +530,12 @@ func (c *Client) DialStreamUp(ctx context.Context) (net.Conn, error) {
 		_ = pr.Close()
 		httputils.CloseTransport(uploadTransport)
 		httputils.CloseTransport(downloadTransport)
-		reqCancel()
 	}
 
 	return conn, nil
 }
 
-func (c *Client) DialPacketUp(ctx context.Context) (net.Conn, error) {
+func (c *Client) DialPacketUp() (net.Conn, error) {
 	uploadTransport, downloadTransport, err := c.getTransport()
 	if err != nil {
 		return nil, err
@@ -584,7 +545,7 @@ func (c *Client) DialPacketUp(ctx context.Context) (net.Conn, error) {
 	if ds := c.cfg.DownloadConfig; ds != nil {
 		downloadCfg = ds
 	}
-	sessionID := c.generateSessionID()
+	sessionID := newSessionID()
 
 	downloadURL := url.URL{
 		Scheme: "https",
@@ -609,17 +570,10 @@ func (c *Client) DialPacketUp(ctx context.Context) (net.Conn, error) {
 	// Async download: avoid blocking on CDN response header buffering
 	gotConn := make(chan bool, 1)
 
-	reqCtx, reqCancel := context.WithCancel(c.ctx) // reqCtx must alive during conn not closed
-	stop := contextutils.AfterFunc(ctx, reqCancel) // temporarily connect ctx with reqCtx when dialing
-	defer stop()                                   // disconnect ctx with reqCtx after dialing
-
-	addrCtx := httputils.NewAddrContext(&conn.NetAddr, reqCtx)
+	addrCtx := httputils.NewAddrContext(&conn.NetAddr, c.ctx)
 	downloadCtx := httptrace.WithClientTrace(addrCtx, &httptrace.ClientTrace{
 		GotConn: func(info httptrace.GotConnInfo) {
-			select {
-			case gotConn <- true:
-			default: // GotConn maybe called multiple times, ignore the second and later calls
-			}
+			gotConn <- true
 		},
 	})
 
@@ -632,13 +586,11 @@ func (c *Client) DialPacketUp(ctx context.Context) (net.Conn, error) {
 	if err != nil {
 		httputils.CloseTransport(uploadTransport)
 		httputils.CloseTransport(downloadTransport)
-		reqCancel()
 		return nil, err
 	}
 	if err = downloadCfg.FillDownloadRequest(downloadReq, sessionID); err != nil {
 		httputils.CloseTransport(uploadTransport)
 		httputils.CloseTransport(downloadTransport)
-		reqCancel()
 		return nil, err
 	}
 	downloadReq.Host = downloadCfg.Host
@@ -663,7 +615,6 @@ func (c *Client) DialPacketUp(ctx context.Context) (net.Conn, error) {
 	if !<-gotConn {
 		httputils.CloseTransport(uploadTransport)
 		httputils.CloseTransport(downloadTransport)
-		reqCancel()
 		var buf [0]byte
 		_, err = wrc.Read(buf[:])
 		return nil, err
@@ -673,10 +624,15 @@ func (c *Client) DialPacketUp(ctx context.Context) (net.Conn, error) {
 	conn.onClose = func() {
 		// uploadTransport already closed by writer
 		httputils.CloseTransport(downloadTransport)
-		reqCancel()
 	}
 
 	return conn, nil
+}
+
+func newSessionID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // WaitReadCloser is an io.ReadCloser that blocks on Read() until the underlying

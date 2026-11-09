@@ -248,7 +248,7 @@ func (m udpMessage) Size() int {
 }
 
 func (m udpMessage) Pack() []byte {
-	data := make([]byte, 0, m.Size())
+	data := make([]byte, m.Size())
 	buffer := bytes.NewBuffer(data)
 	_ = binary.Write(buffer, binary.BigEndian, m.SessionID)
 	_ = binary.Write(buffer, binary.BigEndian, uint16(len(m.Host)))

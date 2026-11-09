@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	atomic2 "github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/common/httputils"
 	"github.com/metacubex/mihomo/common/once"
 	"github.com/metacubex/mihomo/component/dialer"
@@ -19,7 +18,7 @@ import (
 	"github.com/metacubex/mihomo/transport/vmess"
 
 	"github.com/metacubex/http"
-	"github.com/metacubex/http/httptrace"
+	"github.com/metacubex/tls"
 	"golang.org/x/exp/slices"
 )
 
@@ -88,15 +87,8 @@ func NewClient(ctx context.Context, options ClientOptions) (client *Client, err 
 }
 
 func (c *Client) h2RoundTripper(tlsConfig *vmess.TLSConfig) {
-	// use h2c mode to disallow the net/http fallback to http1.1
-	//
-	// Note that this usage is only applicable to our own net/http fork.
-	// The standard library also needs to mask the tls.Conn type for the conn returned by DialTLSContext,
-	// see: https://github.com/golang/go/issues/79293#issuecomment-4426393534
-	protocols := new(http.Protocols)
-	protocols.SetUnencryptedHTTP2(true)
-	c.roundTripper = &http.Transport{
-		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+	c.roundTripper = &http.Http2Transport{
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 			conn, err := c.dialer.DialContext(ctx, network, c.server)
 			if err != nil {
 				return nil, err
@@ -108,7 +100,7 @@ func (c *Client) h2RoundTripper(tlsConfig *vmess.TLSConfig) {
 			}
 			return tlsConn, nil
 		},
-		Protocols:       protocols,
+		AllowHTTP:       false,
 		IdleConnTimeout: DefaultSessionTimeout,
 	}
 }
@@ -141,7 +133,7 @@ func (c *Client) resetHealthCheckTimer() {
 	c.healthCheckTimer.Reset(DefaultHealthCheckTimeout)
 }
 
-func (c *Client) roundTrip(ctx context.Context, request *http.Request, conn *httpConn) error {
+func (c *Client) roundTrip(request *http.Request, conn *httpConn) {
 	c.startOnce.Do(c.start)
 	pipeReader, pipeWriter := io.Pipe()
 	request.Body = pipeReader
@@ -153,36 +145,20 @@ func (c *Client) roundTrip(ctx context.Context, request *http.Request, conn *htt
 	conn.closeFn = once.OnceFunc(func() {
 		c.count.Add(-1)
 	})
-	requestCtx, cancel := context.WithCancel(c.ctx) // requestCtx must alive during conn not closed
-	conn.cancelFn = cancel                          // cancel ctx when conn closed
-
-	// Use gotConn to detect when TCP connection is established, so we can
-	// return the conn immediately without waiting for the HTTP response.
-	gotConn := make(chan bool, 1)
-	addrCtx := httputils.NewAddrContext(&conn.NetAddr, requestCtx)
-	streamCtx := httptrace.WithClientTrace(addrCtx, &httptrace.ClientTrace{
-		GotConn: func(info httptrace.GotConnInfo) {
-			select {
-			case gotConn <- true:
-			default: // GotConn maybe called multiple times, ignore the second and later calls
-			}
-		},
-	})
-
-	var requestErr atomic2.TypedValue[error]
+	ctx, cancel := context.WithCancel(c.ctx) // requestCtx must alive during conn not closed
+	conn.cancelFn = cancel                   // cancel ctx when conn closed
 	go func() {
-		request = request.WithContext(streamCtx)
+		timeout := time.AfterFunc(C.DefaultTCPTimeout, cancel) // only cancel when RoundTrip timeout
+		defer timeout.Stop()                                   // RoundTrip already returned, stop the timer
+		request = request.WithContext(httputils.NewAddrContext(&conn.NetAddr, ctx))
 		response, err := c.roundTripper.RoundTrip(request)
 		if err != nil {
-			requestErr.Store(err)
-			close(gotConn)
 			_ = pipeWriter.CloseWithError(err)
 			_ = pipeReader.CloseWithError(err)
 			conn.setup(nil, err)
 		} else if response.StatusCode != http.StatusOK {
 			_ = response.Body.Close()
 			err = fmt.Errorf("unexpected status code: %d", response.StatusCode)
-			requestErr.Store(err)
 			_ = pipeWriter.CloseWithError(err)
 			_ = pipeReader.CloseWithError(err)
 			conn.setup(nil, err)
@@ -191,13 +167,6 @@ func (c *Client) roundTrip(ctx context.Context, request *http.Request, conn *htt
 			conn.setup(response.Body, nil)
 		}
 	}()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-gotConn:
-		return requestErr.Load()
-	}
 }
 
 func (c *Client) newConnectRequest(host, userAgent string) *http.Request {
@@ -218,33 +187,21 @@ func (c *Client) newConnectRequest(host, userAgent string) *http.Request {
 func (c *Client) Dial(ctx context.Context, host string) (net.Conn, error) {
 	request := c.newConnectRequest(host, TCPUserAgent)
 	conn := &tcpConn{}
-	err := c.roundTrip(ctx, request, &conn.httpConn)
-	if err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
+	c.roundTrip(request, &conn.httpConn)
 	return conn, nil
 }
 
 func (c *Client) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 	request := c.newConnectRequest(UDPMagicAddress, UDPUserAgent)
 	conn := &clientPacketConn{}
-	err := c.roundTrip(ctx, request, &conn.httpConn)
-	if err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
+	c.roundTrip(request, &conn.httpConn)
 	return conn, nil
 }
 
 func (c *Client) ListenICMP(ctx context.Context) (*IcmpConn, error) {
 	request := c.newConnectRequest(ICMPMagicAddress, ICMPUserAgent)
 	conn := &IcmpConn{}
-	err := c.roundTrip(ctx, request, &conn.httpConn)
-	if err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
+	c.roundTrip(request, &conn.httpConn)
 	return conn, nil
 }
 

@@ -1,7 +1,6 @@
 package tuic
 
 import (
-	"context"
 	"net"
 	"strings"
 	"time"
@@ -33,7 +32,7 @@ type Listener struct {
 	servers      []*tuic.Server
 }
 
-func New(config LC.TuicServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
+func New(config LC.TuicServer, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-TUIC"),
@@ -129,7 +128,7 @@ func New(config LC.TuicServer, lc C.InboundListenConfig, tunnel C.Tunnel, additi
 	handleTcpFn := func(conn net.Conn, addr socks5.Addr, _additions ...inbound.Addition) error {
 		//newAdditions := additions
 		//if len(_additions) > 0 {
-		//	newAdditions = slices.Clip(additions) // force the subsequent `append()` to copy the slice
+		//	newAdditions = slices.Clone(additions)
 		//	newAdditions = append(newAdditions, _additions...)
 		//}
 		//conn, metadata := inbound.NewSocket(addr, conn, C.TUIC, newAdditions...)
@@ -140,7 +139,7 @@ func New(config LC.TuicServer, lc C.InboundListenConfig, tunnel C.Tunnel, additi
 	handleUdpFn := func(addr socks5.Addr, packet C.UDPPacket, _additions ...inbound.Addition) error {
 		newAdditions := additions
 		if len(_additions) > 0 {
-			newAdditions = slices.Clip(additions) // force the subsequent `append()` to copy the slice
+			newAdditions = slices.Clone(additions)
 			newAdditions = append(newAdditions, _additions...)
 		}
 		tunnel.HandleUDPPacket(inbound.NewPacket(addr, packet, C.TUIC, newAdditions...))
@@ -178,7 +177,7 @@ func New(config LC.TuicServer, lc C.InboundListenConfig, tunnel C.Tunnel, additi
 	for _, addr := range strings.Split(config.Listen, ",") {
 		addr := addr
 
-		ul, err := lc.ListenPacket(context.Background(), "udp", addr)
+		ul, err := inbound.ListenPacket("udp", addr)
 		if err != nil {
 			return nil, err
 		}

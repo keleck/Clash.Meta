@@ -9,10 +9,6 @@ import (
 	P "github.com/metacubex/mihomo/constant/provider"
 )
 
-type SelectorOption struct {
-	DefaultSelected string `group:"default-selected,omitempty"`
-}
-
 type Selector struct {
 	*GroupBase
 	disableUDP bool
@@ -66,13 +62,12 @@ func (s *Selector) MarshalJSON() ([]byte, error) {
 	}
 
 	return json.Marshal(map[string]any{
-		"type":          s.Type().String(),
-		"now":           s.Now(),
-		"all":           all,
-		"testUrl":       url,
-		"hidden":        s.Hidden(),
-		"icon":          s.Icon(),
-		"emptyFallback": s.EmptyFallback().Name(),
+		"type":    s.Type().String(),
+		"now":     s.Now(),
+		"all":     all,
+		"testUrl": url,
+		"hidden":  s.Hidden(),
+		"icon":    s.Icon(),
 	})
 }
 
@@ -119,7 +114,7 @@ func (s *Selector) Proxies() []C.Proxy {
 	return s.GetProxies(false)
 }
 
-func NewSelector(option GroupCommonOption, selectorOption SelectorOption, emptyFallback C.Proxy, providers []P.ProxyProvider) (*Selector, error) {
+func NewSelector(option *GroupCommonOption, providers []P.ProxyProvider) *Selector {
 	return &Selector{
 		GroupBase: NewGroupBase(GroupBaseOption{
 			Name:           option.Name,
@@ -131,11 +126,10 @@ func NewSelector(option GroupCommonOption, selectorOption SelectorOption, emptyF
 			ExcludeType:    option.ExcludeType,
 			TestTimeout:    option.TestTimeout,
 			MaxFailedTimes: option.MaxFailedTimes,
-			EmptyFallback:  emptyFallback,
 			Providers:      providers,
 		}),
-		selected:   selectorOption.DefaultSelected,
+		selected:   "COMPATIBLE",
 		disableUDP: option.DisableUDP,
 		testUrl:    option.URL,
-	}, nil
+	}
 }

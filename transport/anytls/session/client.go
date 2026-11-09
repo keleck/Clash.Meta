@@ -31,21 +31,17 @@ type Client struct {
 
 	padding *atomic.Pointer[padding.PaddingFactory]
 
-	clientMetadata     string
 	idleSessionTimeout time.Duration
 	minIdleSession     int
-	disableReuse       bool
 }
 
-func NewClient(ctx context.Context, dialOut util.DialOutFunc, _padding *atomic.Pointer[padding.PaddingFactory], clientMetadata string, idleSessionCheckInterval, idleSessionTimeout time.Duration, minIdleSession int, disableReuse bool) *Client {
+func NewClient(ctx context.Context, dialOut util.DialOutFunc, _padding *atomic.Pointer[padding.PaddingFactory], idleSessionCheckInterval, idleSessionTimeout time.Duration, minIdleSession int) *Client {
 	c := &Client{
 		sessions:           make(map[uint64]*Session),
 		dialOut:            dialOut,
 		padding:            _padding,
-		clientMetadata:     clientMetadata,
 		idleSessionTimeout: idleSessionTimeout,
 		minIdleSession:     minIdleSession,
-		disableReuse:       disableReuse,
 	}
 	if idleSessionCheckInterval <= time.Second*5 {
 		idleSessionCheckInterval = time.Second * 30
@@ -55,9 +51,7 @@ func NewClient(ctx context.Context, dialOut util.DialOutFunc, _padding *atomic.P
 	}
 	c.die, c.dieCancel = context.WithCancel(ctx)
 	c.idleSession = skiplist.NewSkipList[uint64, *Session]()
-	if !c.disableReuse {
-		util.StartRoutine(c.die, idleSessionCheckInterval, c.idleCleanup)
-	}
+	util.StartRoutine(c.die, idleSessionCheckInterval, c.idleCleanup)
 	return c
 }
 
@@ -72,9 +66,7 @@ func (c *Client) CreateStream(ctx context.Context) (net.Conn, error) {
 	var stream *Stream
 	var err error
 
-	if !c.disableReuse {
-		session = c.getIdleSession()
-	}
+	session = c.getIdleSession()
 	if session == nil {
 		session, err = c.createSession(ctx)
 	}
@@ -90,15 +82,10 @@ func (c *Client) CreateStream(ctx context.Context) (net.Conn, error) {
 	stream.dieHook = func() {
 		// If Session is not closed, put this Stream to pool
 		if !session.IsClosed() {
-			if c.disableReuse {
-				session.Close()
-				return
-			}
-
 			select {
 			case <-c.die.Done():
 				// Now client has been closed
-				session.Close()
+				go session.Close()
 			default:
 				c.idleSessionLock.Lock()
 				session.idleSince = time.Now()
@@ -128,14 +115,12 @@ func (c *Client) createSession(ctx context.Context) (*Session, error) {
 		return nil, err
 	}
 
-	session := NewClientSession(underlying, c.padding, c.clientMetadata)
+	session := NewClientSession(underlying, c.padding)
 	session.seq = c.sessionCounter.Add(1)
 	session.dieHook = func() {
-		if !c.disableReuse {
-			c.idleSessionLock.Lock()
-			c.idleSession.Remove(math.MaxUint64 - session.seq)
-			c.idleSessionLock.Unlock()
-		}
+		c.idleSessionLock.Lock()
+		c.idleSession.Remove(math.MaxUint64 - session.seq)
+		c.idleSessionLock.Unlock()
 
 		c.sessionsLock.Lock()
 		delete(c.sessions, session.seq)
@@ -174,10 +159,9 @@ func (c *Client) idleCleanup() {
 
 func (c *Client) idleCleanupExpTime(expTime time.Time) {
 	activeCount := 0
-
-	c.idleSessionLock.Lock()
 	sessionToClose := make([]*Session, 0, c.idleSession.Len())
 
+	c.idleSessionLock.Lock()
 	it := c.idleSession.Iterate()
 	for it.IsNotEnd() {
 		session := it.Value()

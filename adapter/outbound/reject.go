@@ -34,7 +34,7 @@ func (r *Reject) ListenPacketContext(ctx context.Context, metadata *C.Metadata) 
 	if err := r.ResolveUDP(ctx, metadata); err != nil {
 		return nil, err
 	}
-	return NewPacketConn(&nopPacketConn{}, r), nil
+	return newPacketConn(&nopPacketConn{}, r), nil
 }
 
 func (r *Reject) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
@@ -82,17 +82,6 @@ func NewPass() *Reject {
 		Base: &Base{
 			name:   "PASS",
 			tp:     C.Pass,
-			udp:    true,
-			prefer: C.DualStack,
-		},
-	}
-}
-
-func NewPassRule() *Reject {
-	return &Reject{
-		Base: &Base{
-			name:   "PASS-RULE",
-			tp:     C.PassRule,
 			udp:    true,
 			prefer: C.DualStack,
 		},

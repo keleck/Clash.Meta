@@ -174,7 +174,6 @@ func (s *serverHandler) handleStream() (err error) {
 					return s.v5Handler.HandleStream(conn)
 				}
 			}
-			_ = conn.Close()
 			return
 		}()
 	}
@@ -238,7 +237,7 @@ func NewServer(option *ServerOption, pc net.PacketConn) (*Server, error) {
 			HandleTcpFn:           option.HandleTcpFn,
 			HandleUdpFn:           option.HandleUdpFn,
 			Users:                 option.Users,
-			MaxUdpRelayPacketSize: maxUdpRelayPacketSize,
+			MaxUdpRelayPacketSize: option.MaxUdpRelayPacketSize,
 		}
 	}
 	return server, nil

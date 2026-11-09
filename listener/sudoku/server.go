@@ -2,7 +2,6 @@ package sudoku
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"net"
@@ -11,7 +10,6 @@ import (
 
 	"github.com/metacubex/mihomo/adapter/inbound"
 	N "github.com/metacubex/mihomo/common/net"
-	"github.com/metacubex/mihomo/common/pool"
 	"github.com/metacubex/mihomo/common/utils"
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
@@ -113,7 +111,6 @@ func (l *Listener) handleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbou
 		closeConns()
 		return
 	}
-	cConn = wrapSessionConn(cConn)
 
 	session, err := sudoku.ReadServerSession(cConn, meta)
 	if err != nil {
@@ -146,8 +143,7 @@ func (l *Listener) handleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbou
 				_ = stream.Close()
 				continue
 			}
-			// mux streams ignore deadlines, so the 200ms sniff peek of a server-speaks-first target would never end
-			go l.handler.HandleSocket(targetAddr, N.NewDeadlineConn(stream), additions...)
+			go l.handler.HandleSocket(targetAddr, stream, additions...)
 		}
 	default:
 		targetAddr := socks5.ParseAddr(session.Target)
@@ -161,26 +157,25 @@ func (l *Listener) handleConn(conn net.Conn, tunnel C.Tunnel, additions ...inbou
 	}
 }
 
-func wrapSessionConn(conn net.Conn) net.Conn {
-	// Sudoku uses framed reads. Keep mihomo's asynchronous peek deadlines from
-	// interrupting a partially consumed frame and desynchronizing the session.
-	return N.NewDeadlineConn(conn)
-}
-
 func (l *Listener) handleUoTSession(conn net.Conn, tunnel C.Tunnel, additions ...inbound.Addition) {
 	writer := sudoku.NewUoTPacketConn(conn)
-	reader := sudoku.NewUoTReader(conn)
 	remoteAddr := conn.RemoteAddr()
 	connID := utils.NewUUIDV4().String() // make a new SNAT key
 
 	for {
-		target, payload, err := reader.ReadDatagram()
+		addrStr, payload, err := sudoku.ReadDatagram(conn)
 		if err != nil {
 			if !errors.Is(err, io.EOF) {
 				log.Debugln("[Sudoku][UoT] session closed: %v", err)
 			}
 			_ = conn.Close()
 			return
+		}
+
+		target := socks5.ParseAddr(addrStr)
+		if target == nil {
+			log.Debugln("[Sudoku][UoT] drop invalid target: %s", addrStr)
+			continue
 		}
 
 		cPacket := &uotPacket{
@@ -208,7 +203,6 @@ func (p *uotPacket) WriteBack(b []byte, addr net.Addr) (int, error) {
 }
 
 func (p *uotPacket) Drop() {
-	_ = pool.Put(p.payload)
 	p.payload = nil
 }
 
@@ -234,7 +228,7 @@ func relayToFallback(wrapper net.Conn, rawConn net.Conn, fallback net.Conn) {
 	N.Relay(rawConn, fallback)
 }
 
-func New(config LC.SudokuServer, lc C.InboundListenConfig, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
+func New(config LC.SudokuServer, tunnel C.Tunnel, additions ...inbound.Addition) (*Listener, error) {
 	if len(additions) == 0 {
 		additions = []inbound.Addition{
 			inbound.WithInName("DEFAULT-SUDOKU"),
@@ -253,7 +247,7 @@ func New(config LC.SudokuServer, lc C.InboundListenConfig, tunnel C.Tunnel, addi
 		return nil, err
 	}
 
-	l, err := lc.Listen(context.Background(), "tcp", config.Listen)
+	l, err := inbound.Listen("tcp", config.Listen)
 	if err != nil {
 		return nil, err
 	}

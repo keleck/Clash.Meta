@@ -4,7 +4,6 @@ import (
 	"context"
 
 	N "github.com/metacubex/mihomo/common/net"
-	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/proxydialer"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
@@ -60,7 +59,7 @@ func (s *SingMux) ListenPacketContext(ctx context.Context, metadata *C.Metadata)
 	if pc == nil {
 		return nil, E.New("packetConn is nil")
 	}
-	return NewPacketConn(N.NewThreadSafePacketConn(pc), s), nil
+	return newPacketConn(N.NewThreadSafePacketConn(pc), s), nil
 }
 
 func (s *SingMux) SupportUDP() bool {
@@ -107,8 +106,8 @@ func NewSingMux(option SingMuxOption, proxy ProxyAdapter) (ProxyAdapter, error) 
 		TCPTimeout:     C.DefaultTCPTimeout,
 		Brutal: mux.BrutalOptions{
 			Enabled:    option.BrutalOpts.Enabled,
-			SendBPS:    utils.StringToBps(option.BrutalOpts.Up),
-			ReceiveBPS: utils.StringToBps(option.BrutalOpts.Down),
+			SendBPS:    StringToBps(option.BrutalOpts.Up),
+			ReceiveBPS: StringToBps(option.BrutalOpts.Down),
 		},
 	})
 	if err != nil {

@@ -2,10 +2,7 @@ package snell
 
 import (
 	"context"
-	"io"
 	"net"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/component/pool"
@@ -15,12 +12,6 @@ import (
 type Pool struct {
 	pool *pool.Pool[*Snell]
 }
-
-const (
-	poolConnNew int32 = iota
-	poolConnReusable
-	poolConnClosed
-)
 
 func (p *Pool) Get() (net.Conn, error) {
 	return p.GetContext(context.Background())
@@ -32,7 +23,7 @@ func (p *Pool) GetContext(ctx context.Context) (net.Conn, error) {
 		return nil, err
 	}
 
-	return &PoolConn{Snell: elm, pool: p}, nil
+	return &PoolConn{elm, p}, nil
 }
 
 func (p *Pool) Put(conn *Snell) {
@@ -41,30 +32,26 @@ func (p *Pool) Put(conn *Snell) {
 		return
 	}
 
-	p.put(conn)
-}
-
-func (p *Pool) put(conn *Snell) {
 	p.pool.Put(conn)
 }
 
 type PoolConn struct {
 	*Snell
-	pool               *Pool
-	closeWriteOnce     sync.Once
-	closeWriteReusable bool
-	closeWriteErr      error
-	closeOnce          sync.Once
-	closeErr           error
-	reusableState      atomic.Int32
-	peerClosed         atomic.Bool
+	pool *Pool
 }
 
 func (pc *PoolConn) Read(b []byte) (int, error) {
+	// save old status of reply (it mutable by Read)
+	reply := pc.Snell.reply
+
 	n, err := pc.Snell.Read(b)
 	if err == shadowaead.ErrZeroChunk {
-		pc.peerClosed.Store(true)
-		return n, io.EOF
+		// if reply is false, it should be client halfclose.
+		// ignore error and read data again.
+		if !reply {
+			pc.Snell.reply = false
+			return pc.Snell.Read(b)
+		}
 	}
 	return n, err
 }
@@ -73,51 +60,12 @@ func (pc *PoolConn) Write(b []byte) (int, error) {
 	return pc.Snell.Write(b)
 }
 
-// MarkReusable allows Close to return this request to the pool after the request header is committed.
-func (pc *PoolConn) MarkReusable() {
-	pc.reusableState.CompareAndSwap(poolConnNew, poolConnReusable)
-}
-
-func (pc *PoolConn) CloseWrite() error {
-	_, err := pc.closeWrite()
-	return err
-}
-
-func (pc *PoolConn) closeWrite() (bool, error) {
-	pc.closeWriteOnce.Do(func() {
-		if pc.reusableState.Swap(poolConnClosed) != poolConnReusable {
-			pc.closeWriteErr = pc.Snell.Close()
-			return
-		}
-		pc.closeWriteReusable = true
-		pc.closeWriteErr = writeZeroChunk(pc.Snell)
-	})
-	return pc.closeWriteReusable, pc.closeWriteErr
-}
-
 func (pc *PoolConn) Close() error {
-	pc.closeOnce.Do(func() {
-		reusable, err := pc.closeWrite()
-		if err != nil {
-			pc.closeErr = err
-			_ = pc.Snell.Close()
-			return
-		}
-		if !reusable {
-			return
-		}
-
-		if !pc.peerClosed.Load() {
-			_ = pc.Snell.Close()
-			return
-		}
-		// mihomo use SetReadDeadline to break bidirectional copy between client and server.
-		// reset it before reuse connection to avoid io timeout error.
-		_ = pc.Snell.Conn.SetReadDeadline(time.Time{})
-		pc.Snell.reply = false
-		pc.pool.put(pc.Snell)
-	})
-	return pc.closeErr
+	// mihomo use SetReadDeadline to break bidirectional copy between client and server.
+	// reset it before reuse connection to avoid io timeout error.
+	_ = pc.Snell.Conn.SetReadDeadline(time.Time{})
+	pc.pool.Put(pc.Snell)
+	return nil
 }
 
 func NewPool(factory func(context.Context) (*Snell, error)) *Pool {

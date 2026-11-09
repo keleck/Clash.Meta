@@ -16,13 +16,13 @@ import (
 func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 	data := DecodeBase64(buf)
 
-	rawLines := bytes.Split(data, []byte("\n"))
+	arr := strings.Split(string(data), "\n")
 
-	proxies := make([]map[string]any, 0, len(rawLines))
+	proxies := make([]map[string]any, 0, len(arr))
 	names := make(map[string]int, 200)
 
-	for _, raw := range rawLines {
-		line := strings.TrimRight(string(raw), " \r")
+	for _, line := range arr {
+		line = strings.TrimRight(line, " \r")
 		if line == "" {
 			continue
 		}
@@ -69,10 +69,8 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 
 			proxies = append(proxies, hysteria)
 
-		case "hysteria2", "hy2", "hysteria2+realm", "hy2+realm":
-			realmMode := strings.HasSuffix(scheme, "+realm")
-			hopLine, ports := splitHysteria2Ports(line)
-			urlHysteria2, err := url.Parse(hopLine)
+		case "hysteria2", "hy2":
+			urlHysteria2, err := url.Parse(line)
 			if err != nil {
 				continue
 			}
@@ -89,9 +87,6 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 			} else {
 				hysteria2["port"] = "443"
 			}
-			if ports != "" {
-				hysteria2["ports"] = ports
-			}
 			hysteria2["obfs"] = query.Get("obfs")
 			hysteria2["obfs-password"] = query.Get("obfs-password")
 			hysteria2["sni"] = query.Get("sni")
@@ -99,19 +94,12 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 			if alpn := query.Get("alpn"); alpn != "" {
 				hysteria2["alpn"] = strings.Split(alpn, ",")
 			}
+			if auth := urlHysteria2.User.String(); auth != "" {
+				hysteria2["password"] = auth
+			}
 			hysteria2["fingerprint"] = query.Get("pinSHA256")
 			hysteria2["down"] = query.Get("down")
 			hysteria2["up"] = query.Get("up")
-			if realmMode {
-				token, _ := url.PathUnescape(urlHysteria2.User.String())
-				realmID, _ := url.PathUnescape(strings.TrimPrefix(urlHysteria2.EscapedPath(), "/"))
-				hysteria2["realm-opts"] = buildRealmOpts("https://"+urlHysteria2.Host, token, realmID, query["stun"])
-				if auth := query.Get("auth"); auth != "" {
-					hysteria2["password"] = auth
-				}
-			} else if auth := urlHysteria2.User.String(); auth != "" {
-				hysteria2["password"] = auth
-			}
 
 			proxies = append(proxies, hysteria2)
 
@@ -343,14 +331,15 @@ func ConvertsV2Ray(buf []byte) ([]map[string]any, error) {
 				vmess["http-opts"] = httpOpts
 
 			case "h2":
+				headers := make(map[string]any)
 				h2Opts := make(map[string]any)
-				h2Opts["path"] = "/"
-				if path, ok := values["path"].(string); ok && path != "" {
-					h2Opts["path"] = path
-				}
 				if host, ok := values["host"].(string); ok && host != "" {
-					h2Opts["host"] = []string{host}
+					headers["Host"] = []string{host}
 				}
+
+				h2Opts["path"] = values["path"]
+				h2Opts["headers"] = headers
+
 				vmess["h2-opts"] = h2Opts
 
 			case "ws", "httpupgrade":

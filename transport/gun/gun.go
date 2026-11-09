@@ -24,10 +24,7 @@ import (
 	"github.com/metacubex/mihomo/transport/vmess"
 
 	"github.com/metacubex/http"
-)
-
-const (
-	Http2NextProtoTLS = "h2"
+	"github.com/metacubex/tls"
 )
 
 var (
@@ -244,7 +241,7 @@ func (g *Conn) SetDeadline(t time.Time) error {
 }
 
 type Transport struct {
-	transport *http.Transport
+	transport *http.Http2Transport
 	cfg       *Config
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -261,7 +258,7 @@ func (t *Transport) Close() error {
 }
 
 func NewTransport(dialFn DialFn, tlsConfig *vmess.TLSConfig, gunCfg *Config) *Transport {
-	dialFunc := func(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialFunc := func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
 		ctx, cancel := context.WithTimeout(ctx, C.DefaultTLSTimeout)
 		defer cancel()
 		pconn, err := dialFn(ctx, network, addr)
@@ -279,37 +276,22 @@ func NewTransport(dialFn DialFn, tlsConfig *vmess.TLSConfig, gunCfg *Config) *Tr
 			return nil, err
 		}
 
-		if tlsConfig.ShadowTLS == nil && tlsConfig.Restls == nil && tlsConfig.Reality == nil && tlsConfig.TLSMirror == nil { // shadowtls, restls, reality and tlsmirror don't return the negotiated ALPN
+		if tlsConfig.Reality == nil { // reality doesn't return the negotiated ALPN
 			state := tlsC.GetTLSConnectionState(conn)
-			if p := state.NegotiatedProtocol; p != Http2NextProtoTLS {
+			if p := state.NegotiatedProtocol; p != http.Http2NextProtoTLS {
 				_ = conn.Close()
-				return nil, fmt.Errorf("http2: unexpected ALPN protocol %s, want %s", p, Http2NextProtoTLS)
+				return nil, fmt.Errorf("http2: unexpected ALPN protocol %s, want %s", p, http.Http2NextProtoTLS)
 			}
 		}
 		return conn, nil
 	}
 
-	// use h2c mode to disallow the net/http fallback to http1.1
-	//
-	// Note that this usage is only applicable to our own net/http fork.
-	// The standard library also needs to mask the tls.Conn type for the conn returned by DialTLSContext,
-	// see: https://github.com/golang/go/issues/79293#issuecomment-4426393534
-	protocols := new(http.Protocols)
-	protocols.SetUnencryptedHTTP2(true)
-	transport := &http.Transport{
-		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			wrapped, err := dialFunc(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-			return wrapped, nil
-		},
-		Protocols:          protocols,
+	transport := &http.Http2Transport{
+		DialTLSContext:     dialFunc,
+		AllowHTTP:          false,
 		DisableCompression: true,
-		HTTP2: &http.HTTP2Config{
-			SendPingTimeout: time.Duration(gunCfg.PingInterval) * time.Second, // If zero, no health check is performed,
-			PingTimeout:     0,
-		},
+		ReadIdleTimeout:    time.Duration(gunCfg.PingInterval) * time.Second, // If zero, no health check is performed
+		PingTimeout:        0,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
